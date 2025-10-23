@@ -2,22 +2,35 @@
 const express = require('express');
 const fetch = require('node-fetch');
 const cors = require('cors');
-const fs = require('fs').promises; // <-- NEW: The File System module
-const path = require('path');     // <-- NEW: Helps build file paths
+const fs = require('fs').promises;
+const path = require('path');
+const { google } = require('googleapis'); // <-- NEW: Google's main toolkit
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // --- 2. Set Up Middleware ---
 app.use(cors());
-app.use(express.json()); // <-- This already handles the JSON!
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// --- NEW: Make the 'public' folder accessible ---
-// This lets anyone view files inside it, like our .txt file
 app.use(express.static('public'));
 
-// --- 3. Define Your Server's Jobs (Endpoints) ---
+// --- 3. Google Sheets Authentication ---
+//    This block runs as soon as the server starts.
+//    It reads the secret JSON from the Environment Variable.
+//    It authorizes our "robot" to use Google Sheets.
+
+const auth = new google.auth.GoogleAuth({
+  credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS), // Reads the secret key
+  scopes: ['https://www.googleapis.com/auth/spreadsheets'], // Sets permission to "Sheets only"
+});
+
+const sheets = google.sheets({ version: 'v4', auth });
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID; // Reads the Sheet ID you just added
+
+console.log('Server authenticated with Google successfully.');
+
+// --- 4. Define Your Server's Jobs (Endpoints) ---
 
 /**
  * JOB #1: "Are you live?" check.
@@ -31,7 +44,6 @@ app.get('/', (req, res) => {
  */
 app.get('/run-ping-job', async (req, res) => {
   const websiteToPing = 'https://hf-object-detect-three.onrender.com';
-  
   console.log('--- Ping job started ---');
   try {
     await fetch(websiteToPing);
@@ -44,45 +56,45 @@ app.get('/run-ping-job', async (req, res) => {
 });
 
 /**
- * JOB #3: "Form Data Receiver" (Now with file writing!)
- * We make this 'async' to wait for the file to be written
+ * JOB #3: "Form Data Receiver" (NEW GOOGLE SHEETS VERSION)
  */
 app.post('/submit-form', async (req, res) => {
   console.log('--- Form data received! ---');
   
-  // 1. Log to console (as before)
+  // 1. Log to console
   console.log(req.body); 
+  const { customer_name, customer_email } = req.body; // Get data from the form
 
-  // 2. Prepare data for the text file
-  // We'll stringify the JSON and add a timestamp and a newline
-  const submission = JSON.stringify(req.body);
-  const dataToStore = `${new Date().toISOString()}: ${submission}\n`;
+  // 2. Prepare the data for Google Sheets
+  //    It needs to be an "array of arrays", where each inner array is a new row.
+  const newRow = [
+    new Date().toISOString(), // Column A (Timestamp)
+    customer_name,            // Column B (Name)
+    customer_email            // Column C (Email)
+  ];
 
-  // 3. Store data in a .txt file
+  // 3. Send the data to the sheet!
   try {
-    // Define the path to our file
-    const filePath = path.join(__dirname, 'public', 'submissions.txt');
-    
-    // Ensure the 'public' directory exists
-    // (This is good practice)
-    await fs.mkdir(path.join(__dirname, 'public'), { recursive: true });
-    
-    // Append the new data to the file
-    await fs.appendFile(filePath, dataToStore);
-    
-    console.log('Data saved to submissions.txt');
-    
-    // 4. Send "thank you"
-    res.status(200).send('Form data received and saved!');
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'Sheet1!A:C', // Assumes your sheet is named 'Sheet1'. Change if needed!
+      valueInputOption: 'USER_ENTERED', // Acts like you typed the data in
+      resource: {
+        values: [newRow], // The array of arrays
+      },
+    });
+
+    console.log('Data saved to Google Sheet successfully!');
+    res.status(200).send('Form data received and saved to Google Sheet!');
 
   } catch (error) {
-    console.error('Error saving file:', error);
-    res.status(500).send('Form data received but could not be saved.');
+    console.error('Error saving to Google Sheet:', error);
+    res.status(500).send('Form data received but could not be saved to Google Sheet.');
   }
 });
 
 
-// --- 4. Start The Server ---
+// --- 5. Start The Server ---
 app.listen(PORT, () => {
   console.log(`Server is listening on port ${PORT}`);
 });
