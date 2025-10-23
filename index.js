@@ -4,7 +4,7 @@ const fetch = require('node-fetch');
 const cors = require('cors');
 const fs = require('fs').promises;
 const path = require('path');
-const { google } = require('googleapis'); // <-- NEW: Google's main toolkit
+const { google } = require('googleapis');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,20 +15,39 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
 
-// --- 3. Google Sheets Authentication ---
-//    This block runs as soon as the server starts.
-//    It reads the secret JSON from the Environment Variable.
-//    It authorizes our "robot" to use Google Sheets.
+// --- 3. Google Sheets Authentication (Safer Version) ---
+// We'll set up the clients, but we'll add error checking.
+let googleAuthClient;
+let SPREADSHEET_ID;
 
-const auth = new google.auth.GoogleAuth({
-  credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS), // Reads the secret key
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'], // Sets permission to "Sheets only"
-});
+try {
+  // Check if the Environment Variables exist
+  if (!process.env.GOOGLE_CREDENTIALS) {
+    throw new Error('GOOGLE_CREDENTIALS environment variable is not set.');
+  }
+  if (!process.env.SPREADSHEET_ID) {
+    throw new Error('SPREADSHEET_ID environment variable is not set.');
+  }
 
-const sheets = google.sheets({ version: 'v4', auth });
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID; // Reads the Sheet ID you just added
+  // Parse the credentials
+  const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
 
-console.log('Server authenticated with Google successfully.');
+  // Set up the Auth client
+  googleAuthClient = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+  });
+
+  // Get the Sheet ID
+  SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+
+  console.log('Google Auth and Spreadsheet ID loaded successfully.');
+
+} catch (error) {
+  // If auth fails, the server will still run, but Sheets will be disabled.
+  console.error('!!! FATAL GOOGLE AUTH ERROR !!!', error.message);
+  console.error('This is likely an error in your Environment Variables. Server will run, but Google Sheets saving will be disabled.');
+}
 
 // --- 4. Define Your Server's Jobs (Endpoints) ---
 
@@ -56,45 +75,70 @@ app.get('/run-ping-job', async (req, res) => {
 });
 
 /**
- * JOB #3: "Form Data Receiver" (NEW GOOGLE SHEETS VERSION)
+ * JOB #3: "Form Data Receiver" (NEW ROBUST VERSION)
  */
-app.post('/submit-form', async (req, res) => {
+app.post('/submit-form', (req, res) => {
   console.log('--- Form data received! ---');
   
-  // 1. Log to console
+  // 1. Log to console (Core Task)
   console.log(req.body); 
-  const { customer_name, customer_email } = req.body; // Get data from the form
 
-  // 2. Prepare the data for Google Sheets
-  //    It needs to be an "array of arrays", where each inner array is a new row.
-  const newRow = [
-    new Date().toISOString(), // Column A (Timestamp)
-    customer_name,            // Column B (Name)
-    customer_email            // Column C (Email)
-  ];
+  // 2. SEND RESPONSE IMMEDIATELY
+  // This is the fix. It unsticks your form.
+  res.status(200).send('Form data received. Processing in background.');
 
-  // 3. Send the data to the sheet!
+  // 3. Run background tasks *after* responding
+  // We don't use 'await' here because we've already sent the response.
+  saveData(req.body);
+});
+
+// This is a new helper function to do the saving
+async function saveData(data) {
+  const { customer_name, customer_email } = data;
+  const dataToStore = `${new Date().toISOString()}: ${JSON.stringify(data)}\n`;
+
+  // --- Task A: Save to .txt file ---
   try {
+    const filePath = path.join(__dirname, 'public', 'submissions.txt');
+    await fs.mkdir(path.join(__dirname, 'public'), { recursive: true });
+    await fs.appendFile(filePath, dataToStore);
+    console.log('Data saved to submissions.txt');
+  } catch (error) {
+    console.error('Error saving to .txt file:', error.message);
+  }
+
+  // --- Task B: Save to Google Sheets ---
+  // Check if Google Auth was successful on startup
+  if (!googleAuthClient || !SPREADSHEET_ID) {
+    console.error('Google Sheets saving skipped. Auth is not configured correctly.');
+    return;
+  }
+
+  try {
+    const sheets = google.sheets({ version: 'v4', auth: googleAuthClient });
+    const newRow = [
+      new Date().toISOString(),
+      customer_name,
+      customer_email
+    ];
+
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
-      range: 'Sheet1!A:C', // Assumes your sheet is named 'Sheet1'. Change if needed!
-      valueInputOption: 'USER_ENTERED', // Acts like you typed the data in
+      range: 'Sheet1!A:C', // Assumes 'Sheet1'. Change if your tab name is different.
+      valueInputOption: 'USER_ENTERED',
       resource: {
-        values: [newRow], // The array of arrays
+        values: [newRow],
       },
     });
-
     console.log('Data saved to Google Sheet successfully!');
-    res.status(200).send('Form data received and saved to Google Sheet!');
-
   } catch (error) {
-    console.error('Error saving to Google Sheet:', error);
-    res.status(500).send('Form data received but could not be saved to Google Sheet.');
+    console.error('Error saving to Google Sheet:', error.message);
   }
-});
+}
 
 
 // --- 5. Start The Server ---
 app.listen(PORT, () => {
   console.log(`Server is listening on port ${PORT}`);
 });
+
