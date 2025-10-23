@@ -11,17 +11,15 @@ const PORT = process.env.PORT || 3000;
 
 // --- 2. Set Up Middleware ---
 app.use(cors());
-app.use(express.json());
+app.use(express.json()); // This is what parses the JSON body
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
 
 // --- 3. Google Sheets Authentication (Safer Version) ---
-// We'll set up the clients, but we'll add error checking.
 let googleAuthClient;
 let SPREADSHEET_ID;
 
 try {
-  // Check if the Environment Variables exist
   if (!process.env.GOOGLE_CREDENTIALS) {
     throw new Error('GOOGLE_CREDENTIALS environment variable is not set.');
   }
@@ -29,22 +27,18 @@ try {
     throw new Error('SPREADSHEET_ID environment variable is not set.');
   }
 
-  // Parse the credentials
   const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
 
-  // Set up the Auth client
   googleAuthClient = new google.auth.GoogleAuth({
     credentials,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    scopes: ['https.www.googleapis.com/auth/spreadsheets'],
   });
 
-  // Get the Sheet ID
   SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 
   console.log('Google Auth and Spreadsheet ID loaded successfully.');
 
 } catch (error) {
-  // If auth fails, the server will still run, but Sheets will be disabled.
   console.error('!!! FATAL GOOGLE AUTH ERROR !!!', error.message);
   console.error('This is likely an error in your Environment Variables. Server will run, but Google Sheets saving will be disabled.');
 }
@@ -84,20 +78,20 @@ app.post('/submit-form', (req, res) => {
   console.log(req.body); 
 
   // 2. SEND RESPONSE IMMEDIATELY
-  // This is the fix. It unsticks your form.
   res.status(200).send('Form data received. Processing in background.');
 
   // 3. Run background tasks *after* responding
-  // We don't use 'await' here because we've already sent the response.
   saveData(req.body);
 });
 
-// This is a new helper function to do the saving
+// This is the helper function to do the saving
 async function saveData(data) {
-  const { customer_name, customer_email } = data;
-  const dataToStore = `${new Date().toISOString()}: ${JSON.stringify(data)}\n`;
+  
+  // --- 1. Get ALL 5 variables from the form data ---
+  const { name, email, phone, message, timestamp } = data;
 
-  // --- Task A: Save to .txt file ---
+  // --- 2. Save to .txt file (using the form's timestamp) ---
+  const dataToStore = `${timestamp || new Date().toISOString()}: ${JSON.stringify(data)}\n`;
   try {
     const filePath = path.join(__dirname, 'public', 'submissions.txt');
     await fs.mkdir(path.join(__dirname, 'public'), { recursive: true });
@@ -107,30 +101,36 @@ async function saveData(data) {
     console.error('Error saving to .txt file:', error.message);
   }
 
-  // --- Task B: Save to Google Sheets ---
-  // Check if Google Auth was successful on startup
+  // --- 3. Save to Google Sheets (using the form's timestamp) ---
   if (!googleAuthClient || !SPREADSHEET_ID) {
     console.error('Google Sheets saving skipped. Auth is not configured correctly.');
     return;
   }
 
   try {
-    const sheets = google.sheets({ version: 'v4', auth: googleAuthClient });
+    // 1. Create the new row array in the correct order
+    //    We use the form's timestamp first, or a new one as a fallback.
     const newRow = [
-      new Date().toISOString(),
-      customer_name,
-      customer_email
+      timestamp || new Date().toISOString(), // Column A (From form)
+      name      || '',                      // Column B
+      email     || '',                      // Column C
+      phone     || '',                      // Column D
+      message   || ''                       // Column E
     ];
 
+    // 2. Get the Google Sheets client
+    const sheets = google.sheets({ version: 'v4', auth: googleAuthClient });
+
+    // 3. Send the data!
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
-      range: 'Sheet1!A:C', // Assumes 'Sheet1'. Change if your tab name is different.
+      range: 'Sheet1!A:E', // Writing to 5 columns
       valueInputOption: 'USER_ENTERED',
       resource: {
         values: [newRow],
       },
     });
-    console.log('Data saved to Google Sheet successfully!');
+    console.log('Data saved to Google Sheet (fully mapped)!');
   } catch (error) {
     console.error('Error saving to Google Sheet:', error.message);
   }
@@ -141,4 +141,3 @@ async function saveData(data) {
 app.listen(PORT, () => {
   console.log(`Server is listening on port ${PORT}`);
 });
-
